@@ -3,12 +3,28 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   EmbedBuilder,
   MessageFlags,
   StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
 } = require("discord.js");
 
 const embedStorage = require("../../data/embedStorage");
+const ShopCatalog = require("../../data/shopCatalog");
+
+async function safeMessageFetch(channel, messageId) {
+  try {
+    return await channel.messages.fetch(messageId);
+  } catch (error) {
+    if (error.code === 10008) {
+      // Message not found
+      return null;
+    }
+    throw error; // Re-throw other errors
+  }
+}
 
 module.exports = {
   name: "interactionCreate",
@@ -24,7 +40,7 @@ module.exports = {
         console.error(error);
         await interaction.reply({
           content: `Something went wrong executing this command`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -42,6 +58,54 @@ module.exports = {
         return false;
       }
     }
+    if (interaction.isButton()) {
+      console.log("Button Clicked:", interaction.customId);
+    }
+    /***
+     * order button shit
+     */
+
+    if (interaction.isButton() && interaction.customId === "order_button") {
+      try {
+        const catalog = await ShopCatalog.findOne({
+          guildId: interaction.guild.id,
+        });
+
+        if (!catalog || catalog.categories.length === 0) {
+          return interaction.reply({
+            content:
+              "No catalog is set up yet, contact owner or staff to raise concern",
+          });
+        }
+
+        const options = catalog.categories.map((cat) =>
+          new StringSelectMenuOptionBuilder()
+            .setLabel(cat.name)
+            .setValue(`cat:${cat.name}`)
+        );
+
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId("select_category")
+          .setPlaceholder("Choose a category")
+          .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(menu);
+
+        return interaction.reply({
+          content: "🛍️ Select a category:",
+          components: [row],
+          ephemeral: true,
+        });
+      } catch (err) {
+        console.error("Failed to handle order_button", err);
+        if (!interaction.replied && !interaction.deferred) {
+          return interaction.reply({
+            content: "An error occurred. Please try again later.",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      }
+    }
 
     //FOR EMBED COMMANDS
     if (interaction.isButton()) {
@@ -49,16 +113,16 @@ module.exports = {
       if (action !== "edit") return;
 
       const name = interaction.customId.slice(`edit_${group}_`.length);
-      const entry = embedStorage.get(name);
-
-      if (!entry) {
+      // const entry = embedStorage.getEmbed(name);
+      const { embed: storedEmbed } = await embedStorage.getEmbed(name);
+      if (!storedEmbed) {
         return interaction.reply({
           content: `Embed "${name}" not found`,
           flags: MessageFlags.Ephemeral,
         });
       }
 
-      const currentEmbed = EmbedBuilder.from(entry.embed);
+      const currentEmbed = EmbedBuilder.from(storedEmbed);
       const titleValue = currentEmbed.data.title || "";
       const descriptionValue = currentEmbed.data.description || "";
       const colorValue = currentEmbed.data.color || "";
@@ -147,17 +211,17 @@ module.exports = {
         const group = parts[3];
         const name = parts.slice(4).join("_");
 
-        const entry = embedStorage.get(name);
-        if (!entry) {
+        const { embed: storedEmbed } = await embedStorage.getEmbed(name);
+        if (!storedEmbed) {
           return interaction.reply({
-            content: `Embed "${name}" not found.`,
-            ephemeral: true,
+            content: `Embed "${name}" not found`,
+            flags: MessageFlags.Ephemeral,
           });
         }
 
         // const newValue = interaction.fields.getTextInputValue(`${field}Input`);
 
-        const updatedEmbed = EmbedBuilder.from(entry.embed);
+        const updatedEmbed = EmbedBuilder.from(storedEmbed);
 
         if (group === "basicinfo") {
           const title = interaction.fields.getTextInputValue("titleInput");
@@ -193,100 +257,199 @@ module.exports = {
           }
         }
 
-        const channel = await interaction.client.channels.fetch(
-          entry.channelId
-        );
-        const message = await channel.messages.fetch(entry.messageId);
-        await message.edit({ embeds: [updatedEmbed] });
+        try {
+          const embedData = await embedStorage.getEmbed(name);
 
-        embedStorage.set(name, { ...entry, embed: updatedEmbed });
+          if (!embedData) {
+            return interaction.reply({
+              content: `Embed "${name}" not found`,
+              flags: MessageFlags.Ephemeral,
+            });
+          }
 
-        await interaction.reply({
-          content: `Embed "${name}" updated.`,
-          flags: MessageFlags.Ephemeral,
-        });
+          // Try to fetch and update the original message
+          try {
+            const channel = await interaction.client.channels.fetch(
+              embedData.channelId
+            );
+            const message = await safeMessageFetch(
+              channel,
+              embedData.messageId
+            );
+
+            if (message) {
+              // Message exists, update it
+              await message.edit({ embeds: [updatedEmbed] });
+            } else {
+              // Message was deleted, create a new one
+              console.log(
+                `Message ${embedData.messageId} not found, creating new message`
+              );
+              const newMessage = await channel.send({
+                embeds: [updatedEmbed],
+                components: [
+                  new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                      .setCustomId(`edit_basicinfo_${name}`)
+                      .setLabel("Edit basic info (title, description, color")
+                      .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                      .setCustomId(`edit_images_${name}`)
+                      .setLabel("Edit images")
+                      .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                      .setCustomId(`edit_footer_${name}`)
+                      .setLabel("Edit footer")
+                      .setStyle(ButtonStyle.Secondary)
+                  ),
+                ],
+              });
+
+              // Update the stored data with new message info
+              embedData.messageId = newMessage.id;
+              embedData.channelId = newMessage.channel.id;
+            }
+          } catch (channelError) {
+            // Channel might not exist or bot has no access
+            console.error("Channel access error:", channelError);
+
+            // Create message in current channel as fallback
+            const newMessage = await interaction.followUp({
+              embeds: [updatedEmbed],
+              ephemeral: false,
+            });
+
+            // Update stored data
+            embedData.messageId = newMessage.id;
+            embedData.channelId = newMessage.channel.id;
+          }
+
+          // Save the updated embed data
+          await embedStorage.saveEmbed(name, {
+            ...embedData,
+            embed: updatedEmbed.toJSON(),
+          });
+
+          await interaction.reply({
+            content: `Embed "${name}" updated.`,
+            flags: MessageFlags.Ephemeral,
+          });
+        } catch (error) {
+          console.error("Error processing modal submission:", error);
+
+          // Check if interaction was already replied to
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({
+              content:
+                "An error occurred while updating the embed. Please try again.",
+              flags: MessageFlags.Ephemeral,
+            });
+          } else {
+            await interaction.followUp({
+              content:
+                "An error occurred while updating the embed. Please try again.",
+              flags: MessageFlags.Ephemeral,
+            });
+          }
+        }
       }
     }
     // END OF EMBED COMMANDS
 
-    //FOR TICKET INTERACTIONS
-    //EDIT TICKET EMBED
-    if (interaction.isButton && interaction.customId === "edit_ticket_embed") {
-      if (interaction.user.id !== interaction.guild.ownerId) {
-        return interaction.reply({
-          content: "Only the server owner can edit this embed.",
-          flags: MessageFlags.Ephemeral,
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId === "select_category"
+    ) {
+      const categoryName = interaction.values[0].split(":")[1];
+      const catalog = await ShopCatalog.findOne({
+        guildId: interaction.guild.id,
+      });
+      const category = catalog.categories.find((c) => c.name === categoryName);
+
+      if (!category || category.items.length === 0) {
+        return interaction.update({
+          content: "No items found in this category.",
+          components: [],
         });
       }
 
+      const options = category.items.map((item) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(item.name)
+          .setValue(`item:${categoryName}:${item.name}`)
+      );
+
+      const itemMenu = new StringSelectMenuBuilder()
+        .setCustomId("select_item")
+        .setPlaceholder("Choose an item")
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(itemMenu);
+
+      const backButton = new ButtonBuilder()
+        .setCustomId("back_to_categories")
+        .setLabel("⬅️ Back")
+        .setStyle(ButtonStyle.Secondary);
+
+      return interaction.update({
+        content: `📦 Items in **${categoryName}**:`,
+        components: [row],
+      });
+    }
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId === "select_item"
+    ) {
+      const [_, category, itemName] = interaction.values[0].split(":");
+
       const modal = new ModalBuilder()
-        .setCustomId("edit_ticket_modal")
-        .setTitle("Edit Ticket Embed");
-
-      const titleInput = new TextInputBuilder()
-        .setCustomId("embed_title")
-        .setLabel("Embed Title")
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder("e.g., 🎫 Submit a Ticket")
-        .setRequired(true);
-
-      const descInput = new TextInputBuilder()
-        .setCustomId("embed_description")
-        .setLabel("Embed Description")
-        .setStyle(TextInputStyle.Paragraph)
-        .setPlaceholder("e.g., Click the button below to submit your ticket.")
-        .setRequired(true);
-
-      const firstRow = new ActionRowBuilder().addComponents(titleInput);
-      const secondRow = new ActionRowBuilder().addComponents(descInput);
-
-      modal.addComponents(firstRow, secondRow);
+        .setCustomId(`order_modal:${category}:${itemName}`)
+        .setTitle("📝 Enter Quantity")
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId("quantity")
+              .setLabel(`How many "${itemName}"?`)
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+          )
+        );
 
       await interaction.showModal(modal);
     }
 
+    const UserTicket = require("../../data/ticketStorage");
+
     if (
-      interaction.isModalSubmit &&
-      interaction.customId === "modal_edit_ticket_embed"
+      interaction.isModalSubmit() &&
+      interaction.customId.startsWith("order_modal:")
     ) {
-      const title = interaction.fields.getTextInputValue("embed_title");
-      const description =
-        interaction.fields.getTextInputValue("embed_description");
+      const [_, category, item] = interaction.customId.split(":");
+      const quantity = parseInt(
+        interaction.fields.getTextInputValue("quantity")
+      );
 
-      const editedEmbed = new EmbedBuilder()
-        .setTitle(title)
-        .setDescription(description)
-        .setColor(0x00ae86)
-        .setTimestamp();
+      if (isNaN(quantity) || quantity <= 0) {
+        return interaction.reply({
+          content: "Invalid quantity. Please enter a number greater than 0.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
 
-      const editButton = new ButtonBuilder()
-        .setCustomId("edit_ticket_embed")
-        .setLabel("Edit")
-        .setStyle(ButtonStyle.Secondary);
-
-      const row = new ActionRowBuilder().addComponents(editButton);
-
-      await interaction.update({
-        embeds: [editedEmbed],
-        components: [row],
+      await UserTicket.create({
+        guildId: interaction.guild.id,
+        userId: interaction.user.id,
+        username: interaction.user.tag,
+        category,
+        item,
+        quantity,
       });
 
-      return;
-    }
-
-    //ORDER TICKET INTERACTIONS
-    if (interaction.isButton && interaction.customId === "submit_order") {
-      const categorySelect = new StringSelectMenuBuilder()
-        .setCustomId("ticket_select_category")
-        .addOptions(
-          {
-            label: "roblox items",
-            value: "roblox-items",
-          },
-          {
-            label: ""
-          }
-        );
+      return interaction.reply({
+        content: `✅ Ticket submitted!\n**Item:** ${item}\n**Category:** ${category}\n**Quantity:** ${quantity}`,
+        flags: MessageFlags.Ephemeral,
+      });
     }
   },
 };

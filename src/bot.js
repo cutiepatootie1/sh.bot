@@ -1,17 +1,11 @@
-require("dotenv").config();
-const { token } = process.env;
+const path = require ("path");
+require("dotenv").config({path: __dirname + '/../.env'});
 const { Client, Collection, GatewayIntentBits } = require("discord.js");
 const mongoose = require("mongoose");
-
 const fs = require("fs");
 
-mongoose
-  .connect(process.env.MONGODB_URL, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((err) => console.error("MongoDB connection error: ", err));
+const token = process.env.token;
+const mongourl = process.env.MONGODB_URL;
 
 const client = new Client({ intents: GatewayIntentBits.Guilds });
 client.commands = new Collection();
@@ -26,15 +20,23 @@ for (const folder of functionFolders) {
     require(`./functions/${folder}/${file}`)(client);
 }
 
-client.login(token);
-setInterval(() => {
-  console.log(`API Ping: ${client.ws.ping}ms`);
-}, 5000);
+async function startBot() {
+  try {
+    await mongoose.connect(mongourl); // ✅ Modern connection without deprecated options
+    console.log(" Connected to MongoDB");
 
-client.on("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+    await client.login(token);
+    console.log("Bot logged in");
 
-  await client.handleCommands();
+    await client.handleCommands();
+    await client.handleEvents();
 
-  await client.handleEvents();
-});
+    setInterval(() => {
+      console.log(`📡 API Ping: ${client.ws.ping}ms`);
+    }, 5000);
+  } catch (err) {
+    console.error("Startup error:", err);
+  }
+}
+
+startBot();

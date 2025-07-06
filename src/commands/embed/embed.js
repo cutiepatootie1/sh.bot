@@ -69,12 +69,13 @@ module.exports = {
     const name = interaction.options.getString("name");
 
     if (sub === "create") {
-      if (embedStorage.has(name)) {
+      if (await embedStorage.hasEmbed(name)) {
         return interaction.reply({
           content: `An embed named **${name}** already exists.`,
           ephemeral: true,
         });
       }
+
       const createdAt = Date.now();
 
       const embed = new EmbedBuilder()
@@ -110,83 +111,121 @@ module.exports = {
         content: `Embed "**${name}**" is created at <t:${unix}:F>`,
         embeds: [embed],
         components: [row],
-        fetchReply: true,
       });
-      embedStorage.set(name, {
-        embed,
+      embedStorage.saveEmbed(name, {
+        embed: embed.toJSON(),
         messageId: message.id,
-        channelId: message.channel.id,
+        channelId: interaction.channel.id,
       });
     }
-    //edit block
+    //END OF CREATE BLOCK
+
+    //EDIT BLOCK
     else if (sub === "edit") {
-      if (!embedStorage.has(name)) {
+      if (!(await embedStorage.hasEmbed(name))) {
         return interaction.reply({
-          content: `No embed found with this name: **${name}.`,
+          content: `An embed named **${name}** already exists.`,
           ephemeral: true,
         });
       }
 
-      const { embed, messageId, channelId } = embedStorage.get(name);
+      const {
+        embed: storedEmbed,
+        messageId,
+        channelId,
+      } = await embedStorage.getEmbed(name);
 
       const title = interaction.options.getString("title");
       const description = interaction.options.getString("description");
       const color = interaction.options.getString("color");
+      const image = interaction.options.getString("image");
+      const thumbnail = interaction.options.getString("thumbnail");
 
-      const updatedEmbed = EmbedBuilder.from(JSON.parse(JSON.stringify(embed)));
+      const updatedEmbed = EmbedBuilder.from(storedEmbed);
 
       if (title) updatedEmbed.setTitle(title);
       if (description) updatedEmbed.setDescription(description);
       if (color) updatedEmbed.setColor(color);
-
-      
+      if (image) updatedEmbed.setImage(image);
+      if (thumbnail) updatedEmbed.setThumbnail(thumbnail);
 
       const channel = await interaction.client.channels.fetch(channelId);
       const message = await channel.messages.fetch(messageId);
 
       await message.edit({ embeds: [updatedEmbed] });
 
-      embedStorage.set(name, { embed: updatedEmbed, messageId, channelId });
+      embedStorage.saveEmbed(name, {
+        embed: updatedEmbed.toJSON(),
+        messageId,
+        channelId,
+      });
       await interaction.reply({
         content: `Embed **${name}** updated.`,
         ephemeral: true,
       });
     }
-    //embed delete block
+
     else if (sub === "delete") {
-      if (!embedStorage.has(name)) {
+      // Fix: Use proper await syntax with parentheses
+      if (!(await embedStorage.hasEmbed(name))) {
         return interaction.reply({
           content: `No embed found with name **${name}**.`,
           ephemeral: true,
         });
       }
 
-      const { messageId, channelId } = embedStorage.get(name);
-      const channel = await interaction.client.channels.fetch(channelId);
-      const message = await channel.messages.fetch(messageId);
+      try {
+        // Fix: Add await here
+        const embedData = await embedStorage.getEmbed(name);
+        const { messageId, channelId } = embedData;
 
-      await message.delete();
-      embedStorage.delete(name);
+        // Try to delete the message (with error handling)
+        try {
+          const channel = await interaction.client.channels.fetch(channelId);
+          const message = await safeMessageFetch(channel, messageId);
 
-      await interaction.reply({
-        content: `Embed **${name}** has been deleted.`,
-        ephemeral: true,
-      });
+          if (message) {
+            await message.delete();
+            console.log(
+              `Deleted message ${messageId} from channel ${channelId}`
+            );
+          } else {
+            console.log(`Message ${messageId} not found, skipping deletion`);
+          }
+        } catch (messageError) {
+          console.error("Error deleting message:", messageError);
+          // Continue with storage deletion even if message deletion fails
+        }
+
+        // Fix: Add await here
+        await embedStorage.deleteEmbed(name);
+
+        await interaction.reply({
+          content: `Embed **${name}** has been deleted.`,
+          ephemeral: true,
+        });
+      } catch (error) {
+        console.error("Error deleting embed:", error);
+        await interaction.reply({
+          content: `An error occurred while deleting embed **${name}**.`,
+          ephemeral: true,
+        });
+      }
     }
+
     //embed show block
     else if (sub === "show") {
-      if (!embedStorage.has(name)) {
+      if (!(await embedStorage.hasEmbed(name))) {
         return interaction.reply({
           content: `No embed found with name **${name}**.`,
           ephemeral: true,
         });
       }
 
-      const { embed } = embedStorage.get(name);
+      const { embed } = await embedStorage.getEmbed(name);
 
       return interaction.reply({
         embeds: [EmbedBuilder.from(embed)],
-        flags: MessageFlags.Ephemeral,
       });
     }
   },
