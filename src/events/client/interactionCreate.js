@@ -13,6 +13,7 @@ const {
 
 const embedStorage = require("../../data/embedStorage");
 const ShopCatalog = require("../../data/shopCatalog");
+const config = require("../../data/configs");
 
 async function safeMessageFetch(channel, messageId) {
   try {
@@ -355,7 +356,6 @@ module.exports = {
       }
     }
     // END OF EMBED COMMANDS
-
     if (
       interaction.isStringSelectMenu() &&
       interaction.customId === "select_category"
@@ -385,11 +385,6 @@ module.exports = {
         .addOptions(options);
 
       const row = new ActionRowBuilder().addComponents(itemMenu);
-
-      const backButton = new ButtonBuilder()
-        .setCustomId("back_to_categories")
-        .setLabel("⬅️ Back")
-        .setStyle(ButtonStyle.Secondary);
 
       return interaction.update({
         content: `📦 Items in **${categoryName}**:`,
@@ -446,9 +441,92 @@ module.exports = {
         quantity,
       });
 
+      const ticketChannel = await interaction.guild.channels.create({
+        name: `ticket-${interaction.user.username}`.toLowerCase(),
+        type: 0, // GuildText
+        permissionOverwrites: [
+          {
+            id: interaction.guild.id,
+            deny: ["ViewChannel"],
+          },
+          {
+            id: interaction.user.id,
+            allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+          },
+          {
+            id: interaction.guild.ownerId,
+            allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+          },
+        ],
+      });
+
+      const QueueConfig = await config.findOne({
+        guildId: interaction.guild.id,
+      });
+
+      if (!config) {
+        await interaction.followUp({
+          content:
+            "⚠️ Queue channel is not configured. Please ask the owner to set it using `/set-queue-ch`.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const queueChannel = await interaction.guild.channels
+        .fetch(QueueConfig.queueChannelId)
+        .catch(() => null);
+
+      if (!queueChannel) {
+        await interaction.followUp({
+          content:
+            "⚠️ Could not find the configured queue channel. It may have been deleted.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const queueEmbed = new EmbedBuilder()
+        .setTitle("🧾 New Order Received")
+        .addFields(
+          { name: "User", value: `<@${interaction.user.id}>`, inline: true },
+          { name: "Item", value: item, inline: true },
+          { name: "Quantity", value: quantity.toString(), inline: true },
+          { name: "Status", value: "Order Received" },
+          { name: "Paid thru", value: "_Staff must set this manually_" },
+          { name: "Go to:", value: `<#${ticketChannel.id}>` }
+        )
+        .setColor("Orange")
+        .setFooter({ text: "Use a command or button to update this ticket." });
+
+      await queueChannel.send({ embeds: [queueEmbed] });
+
       return interaction.reply({
         content: `✅ Ticket submitted!\n**Item:** ${item}\n**Category:** ${category}\n**Quantity:** ${quantity}`,
         flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith("confirm_order_")
+    ) {
+      const userId = interaction.customId.split("_")[2];
+      if (interaction.user.id !== userId) {
+        return interaction.reply({
+          content: "❌ Only the ticket owner can confirm this order.",
+          ephemeral: true,
+        });
+      }
+
+      await UserTicket.findOneAndUpdate(
+        { guildId: interaction.guild.id, userId },
+        { status: "Confirmed" }
+      );
+
+      await interaction.reply({
+        content: "✅ Thank you! Your order has been confirmed as delivered.",
+        ephemeral: true,
       });
     }
   },
