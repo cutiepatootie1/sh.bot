@@ -14,6 +14,7 @@ const {
 const embedStorage = require("../../data/embedStorage");
 const ShopCatalog = require("../../data/shopCatalog");
 const config = require("../../data/configs");
+const ticketStorage = require("../../data/ticketStorage");
 
 async function safeMessageFetch(channel, messageId) {
   try {
@@ -103,6 +104,78 @@ module.exports = {
           return interaction.reply({
             content: "An error occurred. Please try again later.",
             flags: MessageFlags.Ephemeral,
+          });
+        }
+      }
+    }
+
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith("confirm_order_")
+    ) {
+      const userId = interaction.customId.slice("confirm_order_".length);
+      console.log("UserId sliced:", userId);
+
+      console.log("Button clicker: ", interaction.user.id);
+      if (interaction.user.id !== userId) {
+        return interaction.reply({
+          content: "❌ Only the ticket owner can confirm this order.",
+          ephemeral: true,
+        });
+      }
+
+      try {
+        // ✅ Immediately defer reply so Discord doesn't timeout
+        await interaction.deferReply({ ephemeral: true });
+
+        const updatedTicket = await ticketStorage.findOneAndUpdate(
+          {
+            guildId: interaction.guild.id,
+            userId: interaction.user.id,
+            status: "Delivered",
+          },
+          { status: "Confirmed" },
+          { new: true }
+        );
+
+        if (!updatedTicket) {
+          return interaction.editReply({
+            content: "⚠️ No matching delivered ticket found.",
+          });
+        }
+
+        const ticketChannel = await interaction.guild.channels
+          .fetch(updatedTicket.channelId)
+          .catch(() => null);
+
+        if (!ticketChannel || !ticketChannel.isTextBased()) {
+          return interaction.editReply({
+            content: "⚠️ Ticket channel not found or invalid.",
+          });
+        }
+
+        const ownerId = interaction.guild.ownerId;
+
+        await ticketChannel.send({
+          content: `<@${ownerId}> 📨 Order confirmed by <@${interaction.user.id}>!\n**This channel will be deleted in 1 hour.**`,
+        });
+
+        await interaction.editReply({
+          content: "✅ Your order has been confirmed!",
+        });
+
+        setTimeout(async () => {
+          const channel = await interaction.guild.channels
+            .fetch(updatedTicket.channelId)
+            .catch(() => null);
+          if (channel) await channel.delete().catch(console.error);
+        }, 3600000); // 1 hour
+      } catch (err) {
+        console.error("Error during confirm_order button:", err);
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({
+            content: "Something went wrong while confirming. Please try again.",
+            ephemeral: true,
           });
         }
       }
@@ -432,15 +505,6 @@ module.exports = {
         });
       }
 
-      await UserTicket.create({
-        guildId: interaction.guild.id,
-        userId: interaction.user.id,
-        username: interaction.user.tag,
-        category,
-        item,
-        quantity,
-      });
-
       const ticketChannel = await interaction.guild.channels.create({
         name: `ticket-${interaction.user.username}`.toLowerCase(),
         type: 0, // GuildText
@@ -499,34 +563,24 @@ module.exports = {
         .setColor("Orange")
         .setFooter({ text: "Use a command or button to update this ticket." });
 
-      await queueChannel.send({ embeds: [queueEmbed] });
+      const sentMessage = await queueChannel.send({ embeds: [queueEmbed] });
+
+      await UserTicket.create({
+        guildId: interaction.guild.id,
+        userId: interaction.user.id,
+        username: interaction.user.tag,
+        category,
+        item,
+        quantity,
+        status: "Order Received",
+        payment: "Unpaid",
+        channelId: ticketChannel.id,
+        ticketMessageId: sentMessage.id,
+      });
 
       return interaction.reply({
         content: `✅ Ticket submitted!\n**Item:** ${item}\n**Category:** ${category}\n**Quantity:** ${quantity}`,
         flags: MessageFlags.Ephemeral,
-      });
-    }
-
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith("confirm_order_")
-    ) {
-      const userId = interaction.customId.split("_")[2];
-      if (interaction.user.id !== userId) {
-        return interaction.reply({
-          content: "❌ Only the ticket owner can confirm this order.",
-          ephemeral: true,
-        });
-      }
-
-      await UserTicket.findOneAndUpdate(
-        { guildId: interaction.guild.id, userId },
-        { status: "Confirmed" }
-      );
-
-      await interaction.reply({
-        content: "✅ Thank you! Your order has been confirmed as delivered.",
-        ephemeral: true,
       });
     }
   },

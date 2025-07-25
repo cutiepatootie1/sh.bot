@@ -8,7 +8,10 @@ const userTicketSchema = new mongoose.Schema({
   category: { type: String, required: true },
   quantity: { type: Number, required: true },
   createdAt: { type: Date, default: Date.now },
-  status: { type: String, default: 'open' } // For queue system later
+  status: { type: String, default: 'Order Received' }, // For queue system later
+  payment: {type: String},
+  channelId: {type: String},
+  ticketMessageId: {type: String}
 });
 
 module.exports = mongoose.model('UserTicket', userTicketSchema, 'tickets');
